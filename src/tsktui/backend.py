@@ -213,47 +213,85 @@ class TSKBackend:
         return out if out else err
 
     def read_file_bytes(self, offset: int = 0, inode: str = "", max_bytes: int = 65536) -> bytes:
-        """Extracts file content to memory via icat."""
+        """Extracts file content to memory via icat with strict byte limit."""
         if not inode:
             return b""
         cmd = ["icat"]
         if offset > 0:
             cmd.extend(["-o", str(offset)])
         cmd.extend([self.image_path, str(inode)])
-        code, out, _ = self.run_cmd_bytes(cmd)
-        if code == 0:
-            return out[:max_bytes] if max_bytes > 0 else out
-        return b""
+        try:
+            p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            if max_bytes > 0:
+                data = p.stdout.read(max_bytes) if p.stdout else b""
+                try:
+                    p.terminate()
+                except Exception:
+                    pass
+                return data
+            else:
+                data, _ = p.communicate()
+                return data
+        except Exception:
+            return b""
 
     def extract_file(self, offset: int, inode: str, dest_dir: str, file_name: str) -> Tuple[bool, str, Dict[str, str]]:
-        """Extracts a file to dest_dir and computes MD5 & SHA256 hashes."""
+        """
+        Securely streams and extracts a file to dest_dir with path traversal
+        protection and live hashing (O(1) memory usage).
+        """
         try:
-            os.makedirs(dest_dir, exist_ok=True)
+            dest_dir_abs = os.path.abspath(dest_dir)
+            os.makedirs(dest_dir_abs, exist_ok=True)
+
+            # Sanitize filename and strictly prevent path traversal
             clean_name = os.path.basename(file_name) or f"inode_{inode}.bin"
             clean_name = re.sub(r'[^\w\.\-\_]', '_', clean_name)
-            dest_path = os.path.join(dest_dir, f"{inode}_{clean_name}")
+            dest_path_abs = os.path.abspath(os.path.join(dest_dir_abs, f"{inode}_{clean_name}"))
+
+            if not dest_path_abs.startswith(dest_dir_abs):
+                return False, "Security error: Invalid destination path traversal detected", {}
 
             cmd = ["icat"]
             if offset > 0:
                 cmd.extend(["-o", str(offset)])
             cmd.extend([self.image_path, str(inode)])
             
-            code, data, err = self.run_cmd_bytes(cmd)
-            if code != 0:
+            p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            md5_obj = hashlib.md5()
+            sha256_obj = hashlib.sha256()
+            bytes_written = 0
+
+            with open(dest_path_abs, "wb") as f:
+                if p.stdout:
+                    while True:
+                        chunk = p.stdout.read(65536)
+                        if not chunk:
+                            break
+                        f.write(chunk)
+                        md5_obj.update(chunk)
+                        sha256_obj.update(chunk)
+                        bytes_written += len(chunk)
+
+            _, err = p.communicate()
+            if p.returncode != 0:
+                if os.path.exists(dest_path_abs) and bytes_written == 0:
+                    try:
+                        os.remove(dest_path_abs)
+                    except OSError:
+                        pass
                 return False, f"icat error: {err.decode(errors='replace')}", {}
 
-            with open(dest_path, "wb") as f:
-                f.write(data)
-
-            md5_hash = hashlib.md5(data).hexdigest()
-            sha256_hash = hashlib.sha256(data).hexdigest()
-
-            return True, dest_path, {"md5": md5_hash, "sha256": sha256_hash, "size": str(len(data))}
+            return True, dest_path_abs, {
+                "md5": md5_obj.hexdigest(),
+                "sha256": sha256_obj.hexdigest(),
+                "size": str(bytes_written)
+            }
         except Exception as e:
             return False, str(e), {}
 
     def search_strings(self, keyword: str, max_results: int = 200) -> List[Dict[str, Any]]:
-        """Searches for keyword across disk strings using srch_strings."""
+        """Searches for keyword across disk strings safely with bounded limits."""
         cmd = ["srch_strings", "-a", "-t", "d", self.image_path]
         try:
             p = subprocess.Popen(
@@ -279,7 +317,10 @@ class TSKBackend:
                 p.terminate()
                 p.wait(timeout=1.0)
             except Exception:
-                pass
+                try:
+                    p.kill()
+                except Exception:
+                    pass
             return results
         except Exception as e:
             return [{"offset": "0", "content": f"Error executing srch_strings: {e}"}]
