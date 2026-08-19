@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+SOURCE="${BASH_SOURCE[0]}"
+while [ -h "$SOURCE" ]; do
+  DIR="$( cd -P "$( dirname "$SOURCE" )" >/dev/null 2>&1 && pwd )"
+  SOURCE="$(readlink "$SOURCE")"
+  [[ $SOURCE != /* ]] && SOURCE="$DIR/$SOURCE"
+done
+SCRIPT_DIR="$( cd -P "$( dirname "$SOURCE" )" >/dev/null 2>&1 && pwd )"
+PYTHON_BIN="$SCRIPT_DIR/.venv/bin/python3"
+
+if [ ! -f "$PYTHON_BIN" ]; then
+    echo "Setting up virtual environment in $SCRIPT_DIR/.venv..."
+    python3 -m venv "$SCRIPT_DIR/.venv"
+    "$SCRIPT_DIR/.venv/bin/pip" install --quiet textual rich
+fi
+
+PYTHONPATH="$SCRIPT_DIR/src" "$PYTHON_BIN" -m tsktui "$@"
